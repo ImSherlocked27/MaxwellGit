@@ -13,7 +13,7 @@ def get_base64_of_image(path):
 def inject_css():
     """Inject custom CSS for the landing page"""
     # Get the background image as base64
-    bg_image = get_base64_of_image("assets/dbd785b6bcfff2745a42f14bd492866be29dff35 (1).jpg")
+    bg_image = get_base64_of_image("dbd785b6bcfff2745a42f14bd492866be29dff35 (1).jpg")
     
     css = f"""
     <style>
