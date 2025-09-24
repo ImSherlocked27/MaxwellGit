@@ -1,0 +1,29 @@
+# Additional requirements for OCR and FAISS integration
+# These should be added to your existing requirements file
+
+# OCR processing library (already present in ocr_landing_ai.py)
+agentic-doc
+
+# For document conversion (Word to PDF)
+docx2pdf
+
+# FAISS for fast vector similarity search
+faiss-cpu  # Use faiss-gpu if you have CUDA support
+
+# Enhanced path handling
+pathlib2
+
+# For numerical operations (FAISS dependency)
+numpy
+
+# For subprocess timeout handling (usually included in Python 3.3+)
+# subprocess32  # Only needed for Python < 3.3
+
+# Core dependencies (likely already present)
+python-dotenv
+langchain
+langchain-openai
+langchain-community
+streamlit
+chromadb
+openai 

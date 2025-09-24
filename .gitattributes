@@ -1,0 +1,5 @@
+*.txt text
+*.md text
+*.py text
+*.json text
+cicd/requirements.txt text 

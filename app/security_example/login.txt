@@ -1,0 +1,201 @@
+"""
+Módulo de autenticación para Maxwell AI usando streamlit-authenticator.
+Implementa autenticación segura con bloqueo de IP y rate limiting.
+"""
+
+import streamlit as st
+import streamlit_authenticator as stauth
+import yaml
+from yaml.loader import SafeLoader
+import time
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
+# Configurar directorio de logs
+LOG_DIR = Path(__file__).parent.parent / 'logs'
+LOG_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOG_DIR / 'auth.log'
+
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(str(LOG_FILE), encoding='utf-8'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('maxwell_auth')
+
+class LoginManager:
+    """Gestor de autenticación y seguridad."""
+    def __init__(self):
+        self.config_path = Path(__file__).parent / 'config.yaml'
+        self._load_config()
+        self._init_session_state()
+        self.authenticator = self._setup_authenticator()
+        
+    def _load_config(self):
+        """Carga la configuración desde el archivo YAML."""
+        try:
+            with open(self.config_path) as file:
+                self.config = yaml.load(file, Loader=SafeLoader)
+        except Exception as e:
+            logger.error(f"Error cargando configuración: {e}")
+            raise
+            
+    def _init_session_state(self):
+        """Inicializa las variables de estado de la sesión."""
+        if 'login_attempts' not in st.session_state:
+            st.session_state.login_attempts = {}
+        if 'blocked_ips' not in st.session_state:
+            st.session_state.blocked_ips = {}
+        if 'rate_limits' not in st.session_state:
+            st.session_state.rate_limits = {}
+            
+    def _setup_authenticator(self) -> stauth.Authenticate:
+        """Configura el autenticador de Streamlit."""
+        return stauth.Authenticate(
+            self.config['credentials'],
+            self.config['cookie']['name'],
+            self.config['cookie']['key'],
+            self.config['cookie']['expiry_days']
+        )
+        
+    def _check_rate_limit(self, ip: str) -> bool:
+        """Verifica si una IP ha excedido el límite de solicitudes."""
+        now = time.time()
+        if ip not in st.session_state.rate_limits:
+            st.session_state.rate_limits[ip] = {'count': 0, 'window_start': now}
+            
+        window = st.session_state.rate_limits[ip]
+        window_duration = self.config['security']['rate_limit_window_hours'] * 3600
+        
+        if now - window['window_start'] > window_duration:
+            window['count'] = 0
+            window['window_start'] = now
+            
+        window['count'] += 1
+        return window['count'] <= self.config['security']['max_requests_per_window']
+        
+    def _is_ip_blocked(self, ip: str) -> Tuple[bool, Optional[int]]:
+        """Verifica si una IP está bloqueada y retorna el tiempo restante."""
+        if ip in st.session_state.blocked_ips:
+            block_until = st.session_state.blocked_ips[ip]
+            if time.time() < block_until:
+                return True, int(block_until - time.time())
+            del st.session_state.blocked_ips[ip]
+        return False, None
+        
+    def _block_ip(self, ip: str):
+        """Bloquea una IP por el tiempo configurado."""
+        block_duration = self.config['security']['block_duration_minutes'] * 60
+        st.session_state.blocked_ips[ip] = time.time() + block_duration
+        logger.warning(f"IP bloqueada: {ip}")
+        
+    def login(self, ip: str) -> Tuple[bool, str]:
+        """Maneja el proceso de login con bloqueo de IP y rate limiting."""
+        try:
+            # Verificar rate limit
+            if not self._check_rate_limit(ip):
+                logger.warning(f"Rate limit excedido para IP: {ip}")
+                return False, "Demasiadas solicitudes. Por favor, intente más tarde."
+                
+            # Verificar si la IP está bloqueada
+            is_blocked, remaining = self._is_ip_blocked(ip)
+            if is_blocked:
+                return False, f"IP bloqueada. Intente de nuevo en {remaining} segundos."
+                
+            # Intentar login con streamlit-authenticator
+            name, authentication_status, username = self.authenticator.login('Login', 'main')
+            
+            if authentication_status:
+                # Login exitoso
+                st.session_state.authentication_status = True
+                st.session_state.username = username
+                st.session_state.name = name
+                logger.info(f"Login exitoso para usuario: {username}")
+                return True, f"¡Bienvenido {name}!"
+            elif authentication_status is False:
+                # Login fallido
+                if ip not in st.session_state.login_attempts:
+                    st.session_state.login_attempts[ip] = 0
+                st.session_state.login_attempts[ip] += 1
+                
+                if st.session_state.login_attempts[ip] >= self.config['security']['max_login_attempts']:
+                    self._block_ip(ip)
+                    return False, f"Demasiados intentos fallidos. IP bloqueada por {self.config['security']['block_duration_minutes']} minutos."
+                    
+                return False, "Credenciales incorrectas"
+            else:
+                return False, "Por favor, complete todos los campos"
+                
+        except Exception as e:
+            logger.error(f"Error en login: {e}")
+            return False, "Error interno del servidor"
+            
+    def logout(self):
+        """Cierra la sesión del usuario."""
+        try:
+            username = st.session_state.get('username')
+            self.authenticator.logout('Logout', 'main')
+            st.session_state.clear()
+            logger.info(f"Sesión cerrada para usuario: {username}")
+        except Exception as e:
+            logger.error(f"Error en logout: {e}")
+            
+    def verify_session(self) -> bool:
+        """Verifica si la sesión actual es válida."""
+        try:
+            return st.session_state.get('authentication_status', False)
+        except Exception as e:
+            logger.error(f"Error verificando sesión: {e}")
+            return False
+
+def show_login():
+    """Muestra la interfaz de login."""
+    login_manager = LoginManager()
+    
+    # Obtener IP del cliente (en producción usar request.headers.get('X-Forwarded-For'))
+    client_ip = "127.0.0.1"  # En producción, obtener la IP real
+    
+    # Centrar el formulario
+    st.markdown("""
+        <style>
+        .login-container {
+            max-width: 400px;
+            margin: 0 auto;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+    
+    with st.container():
+        st.markdown('<div class="login-container">', unsafe_allow_html=True)
+        
+        success, message = login_manager.login(client_ip)
+        
+        if success:
+            st.success(message)
+            st.rerun()
+        elif message:
+            st.error(message)
+            
+        # Mostrar información de seguridad
+        with st.expander("ℹ️ Información de Seguridad"):
+            st.markdown("""
+            ### Políticas de Seguridad
+            - Máximo 5 intentos de inicio de sesión
+            - Bloqueo de 5 minutos después de intentos fallidos
+            - Sesión expira después de 24 horas
+            - Contraseñas deben contener:
+              - Mínimo 8 caracteres
+              - Al menos una letra mayúscula
+              - Al menos un número
+              - Al menos un carácter especial
+            """)
+            
+        st.markdown('</div>', unsafe_allow_html=True)

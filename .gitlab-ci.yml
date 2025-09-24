@@ -1,0 +1,173 @@
+stages:
+  - Build & Push Image # Define la etapa para construir la imagen de Docker y enviarla a un registro.
+  - Quality Assurance  # La etapa "Quality Assurance" será donde se ejecutarán las pruebas de calidad del código
+  - Security & Scan # Define la etapa para realizar análisis de seguridad en las imágenes construidas.
+  - Trigger AZ TF # Define la etapa para disparar un trabajo de infraestructura en Azure mediante Terraform.
+
+include: 'cicd-config.yaml' # Incluye el archivo 'cicd-config.yaml', que puede contener variables o configuraciones adicionales.
+
+variables:
+  PROJECT_NAME: '$CI_PROJECT_TITLE' # Nombre del proyecto GitLab basado en el título del proyecto actual.
+  DOCKER_IMAGE: "$DOCKER_IMAGE" # Imagen de Docker construida a partir de las variables del pipeline.
+
+Build & Push Image: # Job para construir y subir la imagen Docker.
+  tags:
+    - kaniko # Específico para builds con Kaniko
+  image: gcr.io/kaniko-project/executor:debug
+  stage: Build & Push Image # Asocia este job con la etapa de construcción y envío de la imagen Docker.
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'" # El trabajo solo se ejecutará si el branch es 'main'.
+  before_script:
+    # Configurar variables de entorno para optimizar el build
+    - export PYTHONDONTWRITEBYTECODE=1
+    - export PYTHONUNBUFFERED=1
+    - export PIP_NO_CACHE_DIR=1
+    - export PIP_DISABLE_PIP_VERSION_CHECK=1
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"$AZURE_REGISTRY\":{\"username\":\"$AZURE_REGISTRY_USER\",\"password\":\"$AZURE_REGISTRY_PASSWORD\"}}}" > /kaniko/.docker/config.json
+  variables:   
+    # 🎯 Node Selector - Ejecutar ESPECÍFICAMENTE en worker-prod-01
+    KUBERNETES_NODE_SELECTOR_1: "kubernetes.io/hostname=worker-prod-01" 
+  script:
+    - if [ "$CI_COMMIT_REF_NAME" = "main" ]; then ENVIRONMENT="dev"; elif [ "$CI_COMMIT_REF_NAME" = "prod" ]; then ENVIRONMENT="prod"; elif [ "$CI_COMMIT_REF_NAME" = "test" ]; then ENVIRONMENT="test"; else ENVIRONMENT="$CI_COMMIT_REF_NAME"; fi # Define el entorno según el nombre del branch.
+    # Construir y subir la imagen usando Kaniko
+    - /kaniko/executor
+      --context $CI_PROJECT_DIR
+      --dockerfile cicd/Dockerfile
+      --destination $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION
+      --cache-ttl=24h
+      --compressed-caching=false
+      --single-snapshot
+    - echo "$AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION" > docker_image.json # Guardar nombre de la imagen en un archivo
+  artifacts:
+    paths:
+      - docker_image.json  # Guardar archivo como artefacto
+    expire_in: 4 week  # Opcional, tiempo de expiración del artefacto
+    
+# Define un job dentro de la etapa "Test" para realizar el análisis de calidad
+Code Quality Test:
+  tags:
+    - kubernetes # Runner de Kubernetes
+  image: node:22.1.0 # Imagen Docker que se usará para ejecutar el job (Node.js versión 22.1.0)
+  stage: Quality Assurance # Asigna este job a la etapa "Test"
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'" # Define que este job solo se ejecuta si el branch es "main"
+  script: # Lista de comandos que se ejecutarán en este job
+    # Define una variable de entorno "ENVIRONMENT" basada en el nombre del branch actual
+    - if [ "$CI_COMMIT_REF_NAME" = "main" ]; then ENVIRONMENT="dev"; elif [ "$CI_COMMIT_REF_NAME" = "prod" ]; then ENVIRONMENT="prod"; elif [ "$CI_COMMIT_REF_NAME" = "test" ]; then ENVIRONMENT="test"; else ENVIRONMENT="$CI_COMMIT_REF_NAME"; fi
+    # Instala el escáner de SonarQube de manera global usando npm
+    - npm install -g sonarqube-scanner
+    # Instala tools jq
+    - apt-get update && apt-get install -y jq
+    # Ejecuta el análisis de SonarQube con las configuraciones definidas
+    - |
+      sonar-scanner \
+        -Dsonar.projectKey=$CI_PROJECT_NAME \
+        -Dsonar.projectName="$CI_PROJECT_TITLE" \
+        -Dsonar.projectVersion=$VERSION \
+        -Dsonar.exclusions=**/cicd/** \
+        -Dsonar.sources=./src \
+        -Dsonar.host.url=$SONAR_HOST_URL \
+        -Dsonar.token=$SONAR_TOKEN \
+        -Dsonar.language=py \
+        -Dsonar.python.version=3.10
+    # Valida el estado del Quality Gate después del análisis
+    - |
+      echo "Verificando estado Quality Gate..."
+      RESPONSE=$(curl -s -u "$SONAR_TOKEN:" "$SONAR_HOST_URL/api/qualitygates/project_status?projectKey=$CI_PROJECT_NAME")
+      STATUS=$(echo $RESPONSE | jq -r '.projectStatus.status')
+      echo "Estado de Quality Gate cumple con los requisitos establecidos.: $STATUS"
+      if [ "$STATUS" != "OK" ]; then
+        echo "Quality Gate no cumple con los requisitos establecidos. Procediendo a detener el pipeline."
+        exit 1
+      fi
+  allow_failure: true # Detiene el pipeline si hay un error en el Quality Gate
+
+Security & Scan:  # Define un job para escanear imágenes Docker en busca de vulnerabilidades.
+  tags:
+    - kubernetes # Runner de Kubernetes
+  image: aquasec/trivy:latest  # Imagen oficial de Trivy que no requiere Docker daemon
+  stage: Security & Scan  # Especifica que este job pertenece a la etapa "Security & Scan".
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'"  # Define que este job solo se ejecuta si el branch es 'main'.
+  dependencies:
+    - Build & Push Image  # Este job depende de que la etapa "Build & Push Image" haya finalizado antes de ejecutarse.
+  before_script:
+    - echo "[[[ Configurando autenticación para registry privado ]]]"
+    # Configurar autenticación para Azure Container Registry usando variables de entorno
+    - export TRIVY_USERNAME=$AZURE_REGISTRY_USER
+    - export TRIVY_PASSWORD=$AZURE_REGISTRY_PASSWORD
+    # Crear directorio para plantillas personalizadas
+    - mkdir -p /tmp/trivy-templates
+    # Descargar plantilla HTML para reportes
+    - wget -q https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl -O /tmp/trivy-templates/html.tpl
+  script:
+    - echo "[[[ Scanning Docker image for vulnerabilities ]]]"  # Mensaje para indicar el inicio del escaneo de la imagen Docker.
+    - echo "[[[ Imagen a escanear $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION ]]]"
+    
+    # Escaneo de vulnerabilidades HIGH con reporte HTML
+    - trivy image --format template --template "@/tmp/trivy-templates/html.tpl" --output trivy-report-high.html --severity HIGH --username $AZURE_REGISTRY_USER --password $AZURE_REGISTRY_PASSWORD $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION
+    
+    # Escaneo de vulnerabilidades CRITICAL con reporte HTML
+    - trivy image --format template --template "@/tmp/trivy-templates/html.tpl" --output trivy-report-critical.html --severity CRITICAL --username $AZURE_REGISTRY_USER --password $AZURE_REGISTRY_PASSWORD $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION
+    
+    # Escaneo de verificación HIGH (solo para logs, sin fallar el job)
+    - trivy image --severity HIGH --exit-code 0 --username $AZURE_REGISTRY_USER --password $AZURE_REGISTRY_PASSWORD $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION
+    
+    # Escaneo de verificación CRITICAL (solo para logs, sin fallar el job)
+    - trivy image --severity CRITICAL --exit-code 0 --username $AZURE_REGISTRY_USER --password $AZURE_REGISTRY_PASSWORD $AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION
+    
+    # Copiar reportes con nombres específicos del proyecto
+    - cp "trivy-report-high.html" "trivy-report-high-$CI_PROJECT_NAME.html"  # Copia el reporte de alta severidad con el nombre específico del proyecto.
+    - cp "trivy-report-critical.html" "trivy-report-critical-$CI_PROJECT_NAME.html"  # Copia el reporte crítico con el nombre específico del proyecto.
+    
+    - echo "[[[ Escaneo de seguridad completado. Revisa los reportes HTML para detalles. ]]]"
+  artifacts:
+    paths:
+      - trivy-report-high-$CI_PROJECT_NAME.html  # Define que los reportes generados se guardarán como artefactos.
+      - trivy-report-critical-$CI_PROJECT_NAME.html  # Define que los reportes generados se guardarán como artefactos.
+    expire_in: 4 week  # Establece que los artefactos expirarán después de 4 semanas.
+  allow_failure: true  # Permite que este job falle sin que afecte la ejecución del pipeline.
+
+Trigger AZ TF:  # Definición de un trabajo para activar el proceso de infraestructura en Azure mediante Terraform.
+  stage: Trigger AZ TF  # Asocia este trabajo con la etapa "Trigger AZ TF", que está orientada a la infraestructura.
+  needs:
+    - job: Build & Push Image
+      artifacts: true
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'"  # El trabajo solo se ejecutará si el branch es 'main'.
+  trigger:  # Define que este trabajo activará otro pipeline en otro proyecto.
+    project: "devops/infraestructura-cloud/poc/maxwell-ai"  # Especifica el proyecto que se va a activar, en este caso el pipeline en "maxwell-ai".
+    branch: "$CI_COMMIT_BRANCH"  # Usa directamente la variable de entorno para que el branch coincida con el branch actual del pipeline.
+    strategy: depend  # Establece que este pipeline depende del éxito del pipeline que se activa. Solo continuará si el pipeline activado es exitoso.
+    forward:
+      pipeline_variables: true  # Permite el paso de variables del pipeline actual al pipeline activado.
+  variables:
+    ENVIRONMENT: "$ENVIRONMENT"  # Define el entorno en el que se desplegará la infraestructura (dev, prod, etc.).
+    DOCKER_IMAGE: "$AZURE_REGISTRY/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME:$VERSION"  # Imagen Docker con la versión del proyecto, construida y almacenada en el registro de Azure.
+
+    
+
+
+    
+
+  
+
+    
+
+  
+
+    
+
+  
+
+    
+
+  
+
+    
+
+  
+
+    
+

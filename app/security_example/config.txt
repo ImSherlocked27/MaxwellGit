@@ -1,0 +1,25 @@
+credentials:
+  usernames:
+    admin:
+      email: admin@infolytics.ai
+      name: Administrador
+      password: $2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewKyNiAYMyzJ/IiW  # 4dm1n#M4xw3ll
+    jdavila:
+      email: jdavila@infolytics.ai
+      name: Jeremías Dávila
+      password: $2b$12$8tGmHy1J5K9Yx5Zz5Q5Zz.5Q5Zz5Q5Zz5Q5Zz5Q5Zz5Q5Zz5Q5Zz  # J3r3m14s#M4xw3ll
+
+cookie:
+  expiry_days: 1
+  key: "maxwell_secure_cookie_key_2024"
+  name: "maxwell_cookie"
+
+security:
+  max_login_attempts: 5
+  block_duration_minutes: 5
+  rate_limit_window_hours: 1
+  max_requests_per_window: 100
+  password_min_length: 8
+  require_special_chars: true
+  require_numbers: true
+  require_uppercase: true

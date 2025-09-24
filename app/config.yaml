@@ -1,0 +1,32 @@
+credentials:
+  usernames:
+    admin:
+      email: admin@infolytics.ai
+      name: Administrator
+      password: $2b$12$R/Y0jlq8NX2HYFw31XG8EONCRi/AZq7Zl21t9g5GwxWAjQwjUwQv.
+    jdavila:
+      email: jdavila@infolytics.ai
+      name: J. Davila
+      password: $2b$12$9z2fO/Sq697Uy.54hD16ter/CE7QdA9Rjd.iL2RbZg6K.nBPJaSiC
+    mgruber:
+      email: mgruber@infolytics.ai
+      name: M. Gruber
+      password: $2b$12$sNc8RRWG9JGzyVe2Vi8g7uctDS02nQ8uuag4QNCn9SCrF4nFJlURi
+cookie:
+  name: maxwell_rag_auth
+  key: maxwell_rag_signature_key
+  expiry_days: 30
+preauthorized:
+  emails:
+  - admin@infolytics.ai
+  - jdavila@infolytics.ai
+  - mgruber@infolytics.ai
+security:
+  max_login_attempts: 5
+  block_duration_minutes: 5
+  rate_limit_window_hours: 1
+  max_requests_per_window: 100
+  password_min_length: 8
+  require_special_chars: true
+  require_numbers: true
+  require_uppercase: true
